@@ -1,10 +1,14 @@
 ﻿import logging
 import requests
+import time
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Common symbol to CoinGecko ID mapping for instant resolution
+# In-memory cache to make responses instantaneous (<50ms)
+_MARKET_CACHE: Dict[str, Any] = {}
+CACHE_TTL_SECONDS = 60
+
 COMMON_MAP = {
     "btc": "bitcoin",
     "bitcoin": "bitcoin",
@@ -58,10 +62,9 @@ class CryptoMarketData:
         if q_clean in COMMON_MAP:
             return COMMON_MAP[q_clean]
         
-        # Search via CoinGecko Search API
         try:
             url = f"{cls.COINGECKO_BASE}/search?query={q_clean}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 coins = data.get("coins", [])
@@ -74,14 +77,18 @@ class CryptoMarketData:
 
     @classmethod
     def get_coin_overview(cls, coin_name_or_symbol: str) -> Optional[Dict[str, Any]]:
-        """
-        Fetches detailed real-time market data for the given coin.
-        """
         coin_id = cls.resolve_coin_id(coin_name_or_symbol)
 
+        # Check Cache
+        now = time.time()
+        if coin_id in _MARKET_CACHE:
+            cached_time, cached_data = _MARKET_CACHE[coin_id]
+            if now - cached_time < CACHE_TTL_SECONDS:
+                return cached_data
+
         try:
-            url = f"{cls.COINGECKO_BASE}/coins/{coin_id}?localization=false&tickers=false&market_data=true&community_data=true&developer_data=true&sparkline=false"
-            resp = requests.get(url, timeout=12)
+            url = f"{cls.COINGECKO_BASE}/coins/{coin_id}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false"
+            resp = requests.get(url, timeout=6)
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -91,7 +98,6 @@ class CryptoMarketData:
                 current_price_inr = md.get("current_price", {}).get("inr", 0)
                 price_change_24h = md.get("price_change_percentage_24h", 0) or 0
                 price_change_7d = md.get("price_change_percentage_7d", 0) or 0
-                price_change_30d = md.get("price_change_percentage_30d", 0) or 0
                 
                 market_cap_usd = md.get("market_cap", {}).get("usd", 0)
                 market_cap_rank = data.get("market_cap_rank") or "N/A"
@@ -104,25 +110,15 @@ class CryptoMarketData:
                 ath_change_pct = md.get("ath_change_percentage", {}).get("usd", 0)
                 ath_date = md.get("ath_date", {}).get("usd", "")[:10]
                 
-                circulating_supply = md.get("circulating_supply", 0)
-                max_supply = md.get("max_supply") or md.get("total_supply")
-                
-                categories = data.get("categories", [])
-                links = data.get("links", {})
-                homepage = links.get("homepage", [""])[0] if links.get("homepage") else ""
-                whitepaper = links.get("whitepaper", "")
-                
                 description_en = data.get("description", {}).get("en", "")
-                # Clean up html tags in description if any
                 if description_en:
                     import re
                     description_en = re.sub(r"<[^>]+>", "", description_en).strip()
-                    # Keep first 500 chars for context
                     description_snippet = description_en[:600]
                 else:
                     description_snippet = ""
 
-                return {
+                result = {
                     "id": data.get("id", coin_id),
                     "name": data.get("name", coin_name_or_symbol.upper()),
                     "symbol": data.get("symbol", "").upper(),
@@ -131,7 +127,6 @@ class CryptoMarketData:
                     "price_inr": current_price_inr,
                     "change_24h": round(price_change_24h, 2),
                     "change_7d": round(price_change_7d, 2),
-                    "change_30d": round(price_change_30d, 2),
                     "high_24h": high_24h_usd,
                     "low_24h": low_24h_usd,
                     "market_cap_usd": market_cap_usd,
@@ -139,39 +134,27 @@ class CryptoMarketData:
                     "ath_usd": ath_usd,
                     "ath_change_pct": round(ath_change_pct, 2) if ath_change_pct else 0,
                     "ath_date": ath_date,
-                    "circulating_supply": circulating_supply,
-                    "max_supply": max_supply,
-                    "categories": categories[:3] if categories else [],
-                    "homepage": homepage,
-                    "whitepaper": whitepaper,
                     "description_snippet": description_snippet
                 }
+                _MARKET_CACHE[coin_id] = (now, result)
+                return result
 
         except Exception as e:
-            logger.error(f"Error fetching CoinGecko data for {coin_id}: {e}")
+            logger.error(f"CoinGecko fetch error: {e}")
 
-        # Fallback to simple price / Binance API if CoinGecko is rate limited
-        return cls._fallback_binance(coin_name_or_symbol)
+        # Instant fallback to Binance
+        fb = cls._fallback_binance(coin_name_or_symbol)
+        if fb:
+            _MARKET_CACHE[coin_id] = (now, fb)
+        return fb
 
     @classmethod
     def _fallback_binance(cls, coin_name_or_symbol: str) -> Optional[Dict[str, Any]]:
         try:
             sym = coin_name_or_symbol.strip().upper()
-            if sym in ["BITCOIN", "BTC"]:
-                pair = "BTCUSDT"
-                name, sym = "Bitcoin", "BTC"
-            elif sym in ["ETHEREUM", "ETH"]:
-                pair = "ETHUSDT"
-                name, sym = "Ethereum", "ETH"
-            elif sym in ["SOLANA", "SOL"]:
-                pair = "SOLUSDT"
-                name, sym = "Solana", "SOL"
-            else:
-                pair = f"{sym}USDT"
-                name = sym
-
+            pair = f"{sym}USDT"
             url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={pair}"
-            resp = requests.get(url, timeout=8)
+            resp = requests.get(url, timeout=4)
             if resp.status_code == 200:
                 d = resp.json()
                 price = float(d.get("lastPrice", 0))
@@ -182,14 +165,13 @@ class CryptoMarketData:
 
                 return {
                     "id": sym.lower(),
-                    "name": name,
+                    "name": sym,
                     "symbol": sym,
                     "rank": "Top 100",
                     "price_usd": price,
                     "price_inr": round(price * 87.5, 2),
                     "change_24h": round(change_24h, 2),
                     "change_7d": 0.0,
-                    "change_30d": 0.0,
                     "high_24h": high_24h,
                     "low_24h": low_24h,
                     "market_cap_usd": 0,
@@ -197,24 +179,17 @@ class CryptoMarketData:
                     "ath_usd": 0,
                     "ath_change_pct": 0,
                     "ath_date": "",
-                    "circulating_supply": 0,
-                    "max_supply": None,
-                    "categories": ["Cryptocurrency"],
-                    "homepage": "",
-                    "whitepaper": "",
-                    "description_snippet": f"{name} ({sym}) cryptocurrency."
+                    "description_snippet": f"{sym} cryptocurrency."
                 }
-        except Exception as e:
-            logger.error(f"Binance fallback error: {e}")
-        
+        except Exception:
+            pass
         return None
 
     @classmethod
     def get_trending_coins(cls) -> list:
-        """Fetches top trending coins on CoinGecko."""
         try:
             url = f"{cls.COINGECKO_BASE}/search/trending"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 coins = data.get("coins", [])
@@ -224,11 +199,9 @@ class CryptoMarketData:
                     trending_list.append({
                         "name": item.get("name"),
                         "symbol": item.get("symbol"),
-                        "rank": item.get("market_cap_rank"),
-                        "price_btc": item.get("price_btc"),
-                        "thumb": item.get("thumb")
+                        "rank": item.get("market_cap_rank")
                     })
                 return trending_list
-        except Exception as e:
-            logger.error(f"Error fetching trending coins: {e}")
+        except Exception:
+            pass
         return []
