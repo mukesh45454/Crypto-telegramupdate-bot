@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import time
 import logging
@@ -240,8 +240,8 @@ def telegram_webhook():
     return jsonify({"status": "ok"}), 200
 
 def setup_webhook_if_cloud():
-    """If running on Render or any cloud host, registers the Telegram webhook automatically."""
-    render_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL", "")
+    """Ensures Telegram Webhook is active for real-time instant responses."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL") or "https://crypto-telegramupdate-bot.onrender.com"
     if render_url:
         webhook_endpoint = f"{render_url.rstrip('/')}/telegram-webhook"
         logger.info(f"Setting Telegram Webhook to: {webhook_endpoint}")
