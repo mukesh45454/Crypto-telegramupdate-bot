@@ -1,51 +1,309 @@
 ﻿import os
-import threading
+import json
+import time
 import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import requests
+from flask import Flask, request, jsonify
 from config import Config
-from bot_service import process_updates
-from notifier_service import run_notifier_loop
+from crypto_market import CryptoMarketData
+from crypto_news import CryptoNewsFetcher
+from ai_analysis import AIAnalysisEngine
+from notifier_service import add_subscriber, run_notifier_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Lightweight Health Check Server for Render Free Web Service
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Crypto Intelligence Telegram Bot is running 24/7!")
+TOKEN = Config.TELEGRAM_BOT_TOKEN
+API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-    def log_message(self, format, *args):
-        pass # Suppress noisy health check logs
+app = Flask(__name__)
 
-def run_health_server():
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logger.info(f"Health check server running on port {port} for Render cloud...")
-    server.serve_forever()
+def send_message(chat_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(f"{API_URL}/sendMessage", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        logger.error(f"Error sending message to {chat_id}: {e}")
+        return None
 
-def main():
-    print("==============================================================")
-    print("   🚀 CRYPTO INTELLIGENCE TELEGRAM BOT (CLOUD 24/7 ENGINE)")
-    print("==============================================================")
-    print("🤖 Bot Username: @Master_cryp1bot")
+def edit_message(chat_id, message_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        r = requests.post(f"{API_URL}/editMessageText", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        return None
 
-    # 1. Start HTTP Health check thread (ensures Render Free tier stays active)
-    http_thread = threading.Thread(target=run_health_server, daemon=True)
-    http_thread.start()
+def answer_callback(callback_query_id):
+    try:
+        requests.post(f"{API_URL}/answerCallbackQuery", json={"callback_query_id": callback_query_id}, timeout=5)
+    except Exception:
+        pass
 
-    # 2. Start Scheduled Notifier thread
+def get_main_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🟠 Bitcoin (BTC)", "callback_data": "coin:bitcoin"},
+                {"text": "🔷 Ethereum (ETH)", "callback_data": "coin:ethereum"}
+            ],
+            [
+                {"text": "🟣 Solana (SOL)", "callback_data": "coin:solana"},
+                {"text": "🛡️ Beldex (BDX)", "callback_data": "coin:beldex"}
+            ],
+            [
+                {"text": "🔥 Trending Coins", "callback_data": "cmd:trending"},
+                {"text": "📰 Breaking News", "callback_data": "cmd:news"}
+            ],
+            [
+                {"text": "📊 Instant Market Digest", "callback_data": "cmd:digest"}
+            ]
+        ]
+    }
+
+def handle_coin(chat_id, coin_query, message_id=None):
+    if not message_id:
+        res = send_message(chat_id, f"⚡ <i>Analyzing <b>{coin_query}</b> market data, news & future scope...</i>")
+        message_id = res.get("result", {}).get("message_id") if res else None
+
+    market_data = CryptoMarketData.get_coin_overview(coin_query)
+    if not market_data:
+        err_msg = f"❌ Could not locate crypto data for <b>'{coin_query}'</b>.\nPlease check symbol or name (e.g. <code>btc</code>, <code>sol</code>, <code>beldex</code>)."
+        if message_id:
+            edit_message(chat_id, message_id, err_msg)
+        else:
+            send_message(chat_id, err_msg)
+        return
+
+    news = CryptoNewsFetcher.get_news_for_coin(market_data["name"], market_data["symbol"], 3)
+    insights = AIAnalysisEngine.generate_coin_insights(market_data, news)
+    report_html = AIAnalysisEngine.format_full_report_html(market_data, news, insights)
+
+    refresh_kb = {
+        "inline_keyboard": [
+            [{"text": f"🔄 Refresh {market_data['symbol']}", "callback_data": f"coin:{market_data['id']}"}],
+            [{"text": "🔙 Main Menu", "callback_data": "cmd:start"}]
+        ]
+    }
+
+    if message_id:
+        edit_message(chat_id, message_id, report_html, reply_markup=refresh_kb)
+    else:
+        send_message(chat_id, report_html, reply_markup=refresh_kb)
+
+def process_single_update(u):
+    """Processes any incoming Telegram update object immediately."""
+    try:
+        # 1. Handle Callback Query (Buttons)
+        if "callback_query" in u:
+            cb = u["callback_query"]
+            cb_id = cb["id"]
+            chat_id = cb["message"]["chat"]["id"]
+            msg_id = cb["message"]["message_id"]
+            data_val = cb["data"]
+            answer_callback(cb_id)
+
+            if data_val.startswith("coin:"):
+                coin = data_val.split(":")[1]
+                edit_message(chat_id, msg_id, f"⚡ <i>Analyzing <b>{coin.capitalize()}</b>...</i>")
+                handle_coin(chat_id, coin, message_id=msg_id)
+            elif data_val == "cmd:trending":
+                trending = CryptoMarketData.get_trending_coins()
+                text = "🔥 <b>TOP TRENDING COINS:</b>\n\n"
+                for t in trending:
+                    text += f"• <b>{t['name']} ({t['symbol']})</b> - Rank #{t['rank']}\n"
+                edit_message(chat_id, msg_id, text, reply_markup=get_main_keyboard())
+            elif data_val == "cmd:news":
+                headlines = CryptoNewsFetcher.get_market_headlines(limit=4)
+                text = "📰 <b>BREAKING CRYPTO NEWS:</b>\n\n"
+                for h in headlines:
+                    title = h['title'].replace("<", "&lt;").replace(">", "&gt;")
+                    text += f"• <a href='{h['link']}'>{title}</a> <i>({h['source']})</i>\n\n"
+                edit_message(chat_id, msg_id, text, reply_markup=get_main_keyboard())
+            elif data_val == "cmd:digest":
+                coins = ["bitcoin", "ethereum", "solana", "beldex"]
+                lines = ["🌅 <b>POP-UP CRYPTO MARKET DIGEST</b> 🌅\n"]
+                for c in coins:
+                    d = CryptoMarketData.get_coin_overview(c)
+                    if d:
+                        trend = "🟢 📈" if d['change_24h'] >= 0 else "🔴 📉"
+                        sign = "+" if d['change_24h'] >= 0 else ""
+                        lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} | {trend} {sign}{d['change_24h']}%")
+                edit_message(chat_id, msg_id, "\n".join(lines), reply_markup=get_main_keyboard())
+            elif data_val == "cmd:start":
+                edit_message(chat_id, msg_id, "🚀 <b>Main Menu:</b>", reply_markup=get_main_keyboard())
+            return
+
+        # 2. Handle Text Messages
+        if "message" in u and "text" in u["message"]:
+            msg = u["message"]
+            chat_id = msg["chat"]["id"]
+            text = msg["text"].strip()
+            user_name = msg.get("from", {}).get("first_name", "Trader")
+            
+            add_subscriber(chat_id)
+
+            if text.startswith("/start"):
+                welcome_text = f"""👋 <b>Welcome, {user_name}!</b>
+
+🔔 <i>You are registered for live crypto intelligence pop-up updates!</i>
+
+<b>What I provide for ANY cryptocurrency:</b>
+• 📊 <b>Live Market Price & Metrics</b> (USD & INR, 24h change, ATH, Rank)
+• 📰 <b>Updated News & Roadmaps</b>
+• 💡 <b>Major Benefits & Real-World Utility</b>
+• 🚀 <b>Future Scope & Long-Term Potential</b>
+
+Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</i>, <i>'Beldex'</i>):"""
+                send_message(chat_id, welcome_text, reply_markup=get_main_keyboard())
+
+            elif text.startswith("/crypto"):
+                parts = text.split(maxsplit=1)
+                if len(parts) > 1:
+                    handle_coin(chat_id, parts[1])
+                else:
+                    send_message(chat_id, "⚠️ Please specify a coin: e.g., <code>/crypto bitcoin</code> or <code>/crypto bdx</code>")
+
+            elif text.startswith("/news"):
+                headlines = CryptoNewsFetcher.get_market_headlines(limit=5)
+                text_resp = "📰 <b>TOP CRYPTO MARKET BREAKING NEWS</b>\n\n"
+                for h in headlines:
+                    title = h['title'].replace("<", "&lt;").replace(">", "&gt;")
+                    text_resp += f"• <a href='{h['link']}'>{title}</a>\n  <i>Source: {h['source']} | {h['published']}</i>\n\n"
+                send_message(chat_id, text_resp)
+
+            elif text.startswith("/trending"):
+                trending = CryptoMarketData.get_trending_coins()
+                text_resp = "🔥 <b>TOP TRENDING COINS:</b>\n\n"
+                for t in trending:
+                    text_resp += f"• <b>{t['name']} ({t['symbol']})</b> - Rank #{t['rank']}\n"
+                send_message(chat_id, text_resp)
+
+            elif text.startswith("/digest"):
+                coins = ["bitcoin", "ethereum", "solana", "beldex"]
+                lines = ["🌅 <b>POP-UP CRYPTO MARKET DIGEST & UPDATE</b> 🌅\n"]
+                for c in coins:
+                    d = CryptoMarketData.get_coin_overview(c)
+                    if d:
+                        trend = "🟢 📈" if d['change_24h'] >= 0 else "🔴 📉"
+                        sign = "+" if d['change_24h'] >= 0 else ""
+                        lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} USD (₹{d['price_inr']:,.2f})\n  24h Change: {trend} <b>{sign}{d['change_24h']}%</b> | Rank #{d['rank']}")
+                send_message(chat_id, "\n".join(lines), reply_markup=get_main_keyboard())
+
+            elif text.lower() in ["hi", "hello", "hey", "help", "menu"]:
+                send_message(chat_id, f"👋 Hello {user_name}! Type any crypto name (e.g. <b>Bitcoin</b>, <b>Ethereum</b>, <b>Beldex</b>, <b>Solana</b>) or select from the menu below:", reply_markup=get_main_keyboard())
+
+            else:
+                cleaned = text.lower()
+                for prefix in ["tell me about", "what is", "future of", "price of", "crypto", "analyze", "update on"]:
+                    cleaned = cleaned.replace(prefix, "")
+                cleaned = cleaned.strip(" ?.!/\\")
+                if not cleaned:
+                    cleaned = text
+                handle_coin(chat_id, cleaned)
+
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+
+# ==========================================================
+# FLASK WEBHOOK ENDPOINTS (FOR INSTANT 0-DELAY CLOUD RESPONSES)
+# ==========================================================
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return "✅ Crypto Intelligence Telegram Bot is Online 24/7 & Active!", 200
+
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+    """Telegram delivers updates directly here in real-time!"""
+    if request.is_json:
+        update_data = request.get_json()
+        threading.Thread(target=process_single_update, args=(update_data,), daemon=True).start()
+    return jsonify({"status": "ok"}), 200
+
+def setup_webhook_if_cloud():
+    """If running on Render or any cloud host, registers the Telegram webhook automatically."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL", "")
+    if render_url:
+        webhook_endpoint = f"{render_url.rstrip('/')}/telegram-webhook"
+        logger.info(f"Setting Telegram Webhook to: {webhook_endpoint}")
+        try:
+            r = requests.post(f"{API_URL}/setWebhook", json={"url": webhook_endpoint}, timeout=10)
+            logger.info(f"Telegram Webhook setup response: {r.json()}")
+            return True
+        except Exception as e:
+            logger.error(f"Error setting Telegram Webhook: {e}")
+    return False
+
+def polling_loop():
+    """High speed fallback polling loop when not using webhooks."""
+    # Delete webhook first so polling works cleanly
+    try:
+        requests.post(f"{API_URL}/deleteWebhook", timeout=5)
+    except Exception:
+        pass
+
+    logger.info("Starting High-Speed Telegram Poller Engine...")
+    offset = 0
+    while True:
+        try:
+            r = requests.get(f"{API_URL}/getUpdates?offset={offset}&timeout=20", timeout=25)
+            if r.status_code != 200:
+                time.sleep(1)
+                continue
+
+            data = r.json()
+            if not data.get("ok"):
+                time.sleep(1)
+                continue
+
+            updates = data.get("result", [])
+            for u in updates:
+                offset = u["update_id"] + 1
+                threading.Thread(target=process_single_update, args=(u,), daemon=True).start()
+
+        except Exception as e:
+            logger.error(f"Error in poll loop: {e}")
+            time.sleep(2)
+
+def run_bot():
+    # 1. Start Notifier loop in background
     notifier_thread = threading.Thread(
-        target=run_notifier_loop, 
-        args=(Config.DAILY_DIGEST_INTERVAL_HOURS,), 
+        target=run_notifier_loop,
+        args=(Config.DAILY_DIGEST_INTERVAL_HOURS,),
         daemon=True
     )
     notifier_thread.start()
 
-    # 3. Start Telegram Polling loop
-    process_updates()
+    # 2. Check if we have a cloud webhook URL
+    is_webhook = setup_webhook_if_cloud()
+    if not is_webhook:
+        # Start polling thread
+        poll_thread = threading.Thread(target=polling_loop, daemon=True)
+        poll_thread.start()
+
+    # 3. Start Flask Web Server
+    port = int(os.getenv("PORT", "10000"))
+    logger.info(f"Starting Webhook & Health server on port {port}...")
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    main()
+    run_bot()
