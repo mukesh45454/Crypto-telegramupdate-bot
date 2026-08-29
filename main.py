@@ -234,9 +234,12 @@ def health_check():
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     """Telegram delivers updates directly here in real-time!"""
-    if request.is_json:
-        update_data = request.get_json()
-        threading.Thread(target=process_single_update, args=(update_data,), daemon=True).start()
+    try:
+        update_data = request.get_json(force=True, silent=True)
+        if update_data:
+            process_single_update(update_data)
+    except Exception as e:
+        logger.error(f"Error handling webhook update: {e}")
     return jsonify({"status": "ok"}), 200
 
 def setup_webhook_if_cloud():

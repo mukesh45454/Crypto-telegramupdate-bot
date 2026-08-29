@@ -8,7 +8,7 @@ load_dotenv(dotenv_path=env_path)
 
 class Config:
     # Telegram settings
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip().strip("\"'")
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8631760685:AAFASOgBW_mx2Kgd_6UMCCw4SCv9ToXO9rc").strip().strip("\"'")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip().strip("\"'")
 
     # AI Model settings (Gemini API - Optional)
