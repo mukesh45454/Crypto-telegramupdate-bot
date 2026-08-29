@@ -182,22 +182,22 @@ Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</
                 else:
                     send_message(chat_id, "⚠️ Please specify a coin: e.g., <code>/crypto bitcoin</code> or <code>/crypto bdx</code>")
 
-            elif text.startswith("/news"):
+            elif text.lower() in ["news", "/news", "crypto news", "breaking news"]:
                 headlines = CryptoNewsFetcher.get_market_headlines(limit=5)
                 text_resp = "📰 <b>TOP CRYPTO MARKET BREAKING NEWS</b>\n\n"
                 for h in headlines:
                     title = h['title'].replace("<", "&lt;").replace(">", "&gt;")
                     text_resp += f"• <a href='{h['link']}'>{title}</a>\n  <i>Source: {h['source']} | {h['published']}</i>\n\n"
-                send_message(chat_id, text_resp)
+                send_message(chat_id, text_resp, reply_markup=get_main_keyboard())
 
-            elif text.startswith("/trending"):
+            elif text.lower() in ["trending", "/trending", "coins", "top coins"]:
                 trending = CryptoMarketData.get_trending_coins()
-                text_resp = "🔥 <b>TOP TRENDING COINS:</b>\n\n"
+                text_resp = "🔥 <b>TOP TRENDING CRYPTOCURRENCIES:</b>\n\n"
                 for t in trending:
                     text_resp += f"• <b>{t['name']} ({t['symbol']})</b> - Rank #{t['rank']}\n"
-                send_message(chat_id, text_resp)
+                send_message(chat_id, text_resp, reply_markup=get_main_keyboard())
 
-            elif text.startswith("/digest"):
+            elif text.lower() in ["digest", "/digest", "market", "overview"]:
                 coins = ["bitcoin", "ethereum", "solana", "beldex"]
                 lines = ["🌅 <b>POP-UP CRYPTO MARKET DIGEST & UPDATE</b> 🌅\n"]
                 for c in coins:
@@ -208,7 +208,7 @@ Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</
                         lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} USD (₹{d['price_inr']:,.2f})\n  24h Change: {trend} <b>{sign}{d['change_24h']}%</b> | Rank #{d['rank']}")
                 send_message(chat_id, "\n".join(lines), reply_markup=get_main_keyboard())
 
-            elif text.lower() in ["hi", "hello", "hey", "help", "menu"]:
+            elif text.lower() in ["hi", "hello", "hey", "help", "menu", "start", "/start"]:
                 send_message(chat_id, f"👋 Hello {user_name}! Type any crypto name (e.g. <b>Bitcoin</b>, <b>Ethereum</b>, <b>Beldex</b>, <b>Solana</b>) or select from the menu below:", reply_markup=get_main_keyboard())
 
             else:
