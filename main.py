@@ -109,6 +109,31 @@ def handle_coin(chat_id, coin_query, message_id=None):
     else:
         send_message(chat_id, report_html, reply_markup=refresh_kb)
 
+import re
+
+def parse_user_query(text: str):
+    t = text.lower().strip()
+    if t == "/start":
+        return "start", ""
+    if t in ["hi", "hello", "hey", "help", "menu", "start", "/menu"]:
+        return "menu", ""
+    if any(k in t for k in ["trending", "top coin", "hot coin", "gainers"]):
+        return "trending", ""
+    if any(k in t for k in ["digest", "overview", "all coins", "popup", "pop-up"]):
+        return "digest", ""
+    if t in ["news", "/news", "crypto news", "breaking news", "headlines"]:
+        return "news", ""
+    
+    cleaned = t
+    for phrase in ["tell me about", "what is", "future scope of", "future scope", "future of", "price of", "rate of", "update on", "updates on", "analysis of", "prediction of", "news on", "news about", "info on", "info about", "details of", "details on", "/crypto"]:
+        cleaned = cleaned.replace(phrase, " ")
+    cleaned = re.sub(r"\b(coin|coins|token|tokens|crypto|cryptocurrency|price|news|rate|rates|update|updates|future|scope|analyze|analysis|prediction|predictions|details|info)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" ?.!/\\,:-_")
+    tokens = cleaned.split()
+    if tokens:
+        return "coin", tokens[0]
+    return "coin", t
+
 def process_single_update(u):
     """Processes any incoming Telegram update object immediately."""
     try:
@@ -161,7 +186,9 @@ def process_single_update(u):
             
             add_subscriber(chat_id)
 
-            if text.startswith("/start"):
+            intent, target = parse_user_query(text)
+
+            if intent == "start":
                 welcome_text = f"""👋 <b>Welcome, {user_name}!</b>
 
 🔔 <i>You are registered for live crypto intelligence pop-up updates!</i>
@@ -175,14 +202,10 @@ def process_single_update(u):
 Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</i>, <i>'Beldex'</i>):"""
                 send_message(chat_id, welcome_text, reply_markup=get_main_keyboard())
 
-            elif text.startswith("/crypto"):
-                parts = text.split(maxsplit=1)
-                if len(parts) > 1:
-                    handle_coin(chat_id, parts[1])
-                else:
-                    send_message(chat_id, "⚠️ Please specify a coin: e.g., <code>/crypto bitcoin</code> or <code>/crypto bdx</code>")
+            elif intent == "menu":
+                send_message(chat_id, f"👋 Hello {user_name}! Type any crypto name (e.g. <b>Bitcoin</b>, <b>Ethereum</b>, <b>Beldex</b>, <b>Solana</b>) or choose from the menu below:", reply_markup=get_main_keyboard())
 
-            elif text.lower() in ["news", "/news", "crypto news", "breaking news"]:
+            elif intent == "news":
                 headlines = CryptoNewsFetcher.get_market_headlines(limit=5)
                 text_resp = "📰 <b>TOP CRYPTO MARKET BREAKING NEWS</b>\n\n"
                 for h in headlines:
@@ -190,14 +213,14 @@ Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</
                     text_resp += f"• <a href='{h['link']}'>{title}</a>\n  <i>Source: {h['source']} | {h['published']}</i>\n\n"
                 send_message(chat_id, text_resp, reply_markup=get_main_keyboard())
 
-            elif text.lower() in ["trending", "/trending", "coins", "top coins"]:
+            elif intent == "trending":
                 trending = CryptoMarketData.get_trending_coins()
                 text_resp = "🔥 <b>TOP TRENDING CRYPTOCURRENCIES:</b>\n\n"
                 for t in trending:
                     text_resp += f"• <b>{t['name']} ({t['symbol']})</b> - Rank #{t['rank']}\n"
                 send_message(chat_id, text_resp, reply_markup=get_main_keyboard())
 
-            elif text.lower() in ["digest", "/digest", "market", "overview"]:
+            elif intent == "digest":
                 coins = ["bitcoin", "ethereum", "solana", "beldex"]
                 lines = ["🌅 <b>POP-UP CRYPTO MARKET DIGEST & UPDATE</b> 🌅\n"]
                 for c in coins:
@@ -208,17 +231,8 @@ Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</
                         lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} USD (₹{d['price_inr']:,.2f})\n  24h Change: {trend} <b>{sign}{d['change_24h']}%</b> | Rank #{d['rank']}")
                 send_message(chat_id, "\n".join(lines), reply_markup=get_main_keyboard())
 
-            elif text.lower() in ["hi", "hello", "hey", "help", "menu", "start", "/start"]:
-                send_message(chat_id, f"👋 Hello {user_name}! Type any crypto name (e.g. <b>Bitcoin</b>, <b>Ethereum</b>, <b>Beldex</b>, <b>Solana</b>) or select from the menu below:", reply_markup=get_main_keyboard())
-
-            else:
-                cleaned = text.lower()
-                for prefix in ["tell me about", "what is", "future of", "price of", "crypto", "analyze", "update on"]:
-                    cleaned = cleaned.replace(prefix, "")
-                cleaned = cleaned.strip(" ?.!/\\")
-                if not cleaned:
-                    cleaned = text
-                handle_coin(chat_id, cleaned)
+            elif intent == "coin":
+                handle_coin(chat_id, target)
 
     except Exception as e:
         logger.error(f"Error processing update: {e}")
