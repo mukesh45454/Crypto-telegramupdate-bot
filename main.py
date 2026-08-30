@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import time
 import logging
@@ -81,14 +81,16 @@ def get_main_keyboard():
 
 def handle_coin(chat_id, coin_query, message_id=None):
     if not message_id:
-        res = send_message(chat_id, f"⚡ <i>Analyzing <b>{coin_query}</b> market data, news & future scope...</i>")
+        res = send_message(chat_id, f"⚡ <i>Analyzing <b>{coin_query.upper()}</b> market data, news & future scope...</i>")
         message_id = res.get("result", {}).get("message_id") if res else None
 
     market_data = CryptoMarketData.get_coin_overview(coin_query)
     if not market_data:
         err_msg = f"❌ Could not locate crypto data for <b>'{coin_query}'</b>.\nPlease check symbol or name (e.g. <code>btc</code>, <code>sol</code>, <code>beldex</code>)."
         if message_id:
-            edit_message(chat_id, message_id, err_msg)
+            res_edit = edit_message(chat_id, message_id, err_msg)
+            if not res_edit or not res_edit.get("ok"):
+                send_message(chat_id, err_msg)
         else:
             send_message(chat_id, err_msg)
         return
@@ -105,7 +107,9 @@ def handle_coin(chat_id, coin_query, message_id=None):
     }
 
     if message_id:
-        edit_message(chat_id, message_id, report_html, reply_markup=refresh_kb)
+        res_edit = edit_message(chat_id, message_id, report_html, reply_markup=refresh_kb)
+        if not res_edit or not res_edit.get("ok"):
+            send_message(chat_id, report_html, reply_markup=refresh_kb)
     else:
         send_message(chat_id, report_html, reply_markup=refresh_kb)
 
@@ -135,7 +139,7 @@ def parse_user_query(text: str):
     return "coin", t
 
 def process_single_update(u):
-    """Processes any incoming Telegram update object immediately."""
+    """Processes any incoming Telegram update object immediately in a background worker."""
     try:
         # 1. Handle Callback Query (Buttons)
         if "callback_query" in u:
@@ -152,7 +156,7 @@ def process_single_update(u):
                 handle_coin(chat_id, coin, message_id=msg_id)
             elif data_val == "cmd:trending":
                 trending = CryptoMarketData.get_trending_coins()
-                text = "🔥 <b>TOP TRENDING COINS:</b>\n\n"
+                text = "🔥 <b>TOP TRENDING CRYPTOCURRENCIES:</b>\n\n"
                 for t in trending:
                     text += f"• <b>{t['name']} ({t['symbol']})</b> - Rank #{t['rank']}\n"
                 edit_message(chat_id, msg_id, text, reply_markup=get_main_keyboard())
@@ -171,7 +175,8 @@ def process_single_update(u):
                     if d:
                         trend = "🟢 📈" if d['change_24h'] >= 0 else "🔴 📉"
                         sign = "+" if d['change_24h'] >= 0 else ""
-                        lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} | {trend} {sign}{d['change_24h']}%")
+                        lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} USD (₹{d['price_inr']:,.2f})\n  24h Change: {trend} <b>{sign}{d['change_24h']}%</b> | Rank #{d['rank']}")
+                lines.append("\n<i>Tap any coin button above or type any coin name for full future scope & utility!</i>")
                 edit_message(chat_id, msg_id, "\n".join(lines), reply_markup=get_main_keyboard())
             elif data_val == "cmd:start":
                 edit_message(chat_id, msg_id, "🚀 <b>Main Menu:</b>", reply_markup=get_main_keyboard())
@@ -185,7 +190,6 @@ def process_single_update(u):
             user_name = msg.get("from", {}).get("first_name", "Trader")
             
             add_subscriber(chat_id)
-
             intent, target = parse_user_query(text)
 
             if intent == "start":
@@ -229,6 +233,7 @@ Tap a button below or simply type any coin (e.g. <i>'Bitcoin'</i>, <i>'Solana'</
                         trend = "🟢 📈" if d['change_24h'] >= 0 else "🔴 📉"
                         sign = "+" if d['change_24h'] >= 0 else ""
                         lines.append(f"• <b>{d['name']} ({d['symbol']})</b>: ${d['price_usd']:,.2f} USD (₹{d['price_inr']:,.2f})\n  24h Change: {trend} <b>{sign}{d['change_24h']}%</b> | Rank #{d['rank']}")
+                lines.append("\n<i>Tap any coin button below or type any coin name for full future scope & utility!</i>")
                 send_message(chat_id, "\n".join(lines), reply_markup=get_main_keyboard())
 
             elif intent == "coin":
@@ -247,13 +252,14 @@ def health_check():
 
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
-    """Telegram delivers updates directly here in real-time!"""
+    """Telegram delivers updates directly here in real-time (<10ms non-blocking acknowledgment)!"""
     try:
         update_data = request.get_json(force=True, silent=True)
         if update_data:
-            process_single_update(update_data)
+            # Spawn worker thread immediately to avoid Telegram timeout
+            threading.Thread(target=process_single_update, args=(update_data,), daemon=True).start()
     except Exception as e:
-        logger.error(f"Error handling webhook update: {e}")
+        logger.error(f"Error in webhook: {e}")
     return jsonify({"status": "ok"}), 200
 
 def setup_webhook_if_cloud():
@@ -272,7 +278,6 @@ def setup_webhook_if_cloud():
 
 def polling_loop():
     """High speed fallback polling loop when not using webhooks."""
-    # Delete webhook first so polling works cleanly
     try:
         requests.post(f"{API_URL}/deleteWebhook", timeout=5)
     except Exception:
@@ -313,7 +318,6 @@ def run_bot():
     # 2. Check if we have a cloud webhook URL
     is_webhook = setup_webhook_if_cloud()
     if not is_webhook:
-        # Start polling thread
         poll_thread = threading.Thread(target=polling_loop, daemon=True)
         poll_thread.start()
 
